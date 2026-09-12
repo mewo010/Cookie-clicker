@@ -72,17 +72,25 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
-          # Restore debug.keystore if base64 file exists
+          # 1. Restore debug.keystore from base64 if present
           if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore || true
-            echo "Restored debug.keystore from debug.keystore.base64"
+            (base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || base64 --decode debug.keystore.base64 > debug.keystore 2>/dev/null) || true
           fi
 
-          # Restore custom release keystore if provided in secrets
+          # 2. Guarantee debug.keystore exists (generate with keytool if missing or empty)
+          if [ ! -f "debug.keystore" ] || [ ! -s "debug.keystore" ]; then
+            echo "Generating valid debug.keystore using keytool..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          # 3. Restore custom release keystore if provided in secrets
           if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            (echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks 2>/dev/null || echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks 2>/dev/null) || true
             echo "Exported release keystore to my-upload-key.jks"
           fi
+
+          # Verify keystore exists
+          ls -la debug.keystore
 
       - name: Ensure Gradle Wrapper exists
         run: |

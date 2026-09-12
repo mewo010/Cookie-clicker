@@ -232,28 +232,37 @@ jobs:
     needs: [build-android, build-ios]
     if: |
       always() &&
+      github.event_name != 'pull_request' &&
       (needs.build-android.result == 'success' || needs.build-ios.result == 'success') &&
-      (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'))
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release != false)
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create Release Directory
-        run: mkdir -p release-assets
+      - name: Create Release Directories
+        run: |
+          mkdir -p release-assets
+          mkdir -p release-files
 
       - name: Download Android Artifacts
         uses: actions/download-artifact@v4
         with:
           name: android-apk
-          path: release-assets/
+          path: release-assets/android
         continue-on-error: true
 
       - name: Download iOS Artifacts
         uses: actions/download-artifact@v4
         with:
           name: ios-build
-          path: release-assets/
+          path: release-assets/ios
         continue-on-error: true
+
+      - name: Organize Release Files
+        run: |
+          find release-assets -type f -exec cp {} release-files/ \;
+          echo "Collected files for release:"
+          ls -la release-files/
 
       - name: Determine Release Tag
         id: get_tag
@@ -263,15 +272,10 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
           else
-            TAG="v1.0.0-build-$(date +'%Y%m%d%H%M%S')"
+            TAG="v1.0.${{ github.run_number }}"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Selected tag: $TAG"
-
-      - name: List Release Assets
-        run: |
-          echo "Assets to publish:"
-          ls -la release-assets/
 
       - name: Create or Update GitHub Release
         uses: softprops/action-gh-release@v2
@@ -281,6 +285,7 @@ jobs:
           draft: false
           prerelease: ${{ github.event.inputs.prerelease || false }}
           generate_release_notes: true
-          files: release-assets/*
+          make_latest: true
+          files: release-files/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

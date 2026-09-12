@@ -1,0 +1,6 @@
+{
+  "name": "Cookie Clicker",
+  "description": "An addictive Cookie Clicker incremental game with offline idle progression, upgrades, custom cookie particle taps, and statistics tracking.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

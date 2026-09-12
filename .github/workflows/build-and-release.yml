@@ -190,18 +190,18 @@ jobs:
           else
             echo "No Xcode project found in repository yet."
             echo "Generating iOS build package instructions..."
-            cat << 'EOF' > dist/ios/README-iOS-Build.txt
-iOS Build Pipeline Information
-=============================
-This GitHub Actions workflow includes separate jobs for Android and iOS.
-Once you add an iOS target or Xcode project (e.g. in /ios or /iosApp), xcodebuild
-will automatically compile and package the release archive (.xcarchive / .zip).
-
-To enable automated App Store or Ad-Hoc code signing in CI:
-1. Export your Apple Distribution Certificate (.p12) and add it to GitHub Secrets.
-2. Add your Provisioning Profile (.mobileprovision) to GitHub Secrets.
-3. Configure APP_STORE_CONNECT_API_KEY in the workflow or repository secrets.
-EOF
+            {
+              echo "iOS Build Pipeline Information"
+              echo "============================="
+              echo "This GitHub Actions workflow includes separate jobs for Android and iOS."
+              echo "Once you add an iOS target or Xcode project (e.g. in /ios or /iosApp), xcodebuild"
+              echo "will automatically compile and package the release archive (.xcarchive / .zip)."
+              echo ""
+              echo "To enable automated App Store or Ad-Hoc code signing in CI:"
+              echo "1. Export your Apple Distribution Certificate (.p12) and add it to GitHub Secrets."
+              echo "2. Add your Provisioning Profile (.mobileprovision) to GitHub Secrets."
+              echo "3. Configure APP_STORE_CONNECT_API_KEY in the workflow or repository secrets."
+            } > dist/ios/README-iOS-Build.txt
             tar -czf dist/ios/ios-build-info.tar.gz -C dist/ios README-iOS-Build.txt
           fi
 

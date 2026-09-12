@@ -1,0 +1,278 @@
+name: Build & Release (Android & iOS)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag (e.g., v1.0.0)'
+        required: false
+        default: ''
+        type: string
+      publish_release:
+        description: 'Publish build artifacts to GitHub Releases'
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: 'Mark release as pre-release'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================================================
+  # 1. ANDROID BUILD JOB
+  # ============================================================================
+  build-android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare environment configuration (.env)
+        run: |
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+              echo "Created .env from .env.example"
+            else
+              touch .env
+            fi
+          fi
+
+      - name: Prepare Android Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Restore debug.keystore if base64 file exists
+          if [ -f "debug.keystore.base64" ] && [ ! -f "debug.keystore" ]; then
+            base64 -d debug.keystore.base64 > debug.keystore || true
+            echo "Restored debug.keystore from debug.keystore.base64"
+          fi
+
+          # Restore custom release keystore if provided in secrets
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > my-upload-key.jks
+            echo "Exported release keystore to my-upload-key.jks"
+          fi
+
+      - name: Ensure Gradle Wrapper exists
+        run: |
+          if [ ! -f "./gradlew" ]; then
+            echo "Generating Gradle Wrapper..."
+            gradle wrapper || true
+          fi
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          fi
+
+      - name: Build Android APK
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PATH: ${{ github.workspace }}/my-upload-key.jks
+        run: |
+          mkdir -p dist/android
+
+          BUILD_CMD="./gradlew"
+          if [ ! -f "./gradlew" ]; then
+            BUILD_CMD="gradle"
+          fi
+
+          # Check if custom release keystore is present
+          if [ -f "my-upload-key.jks" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "Building Release APK with signing credentials..."
+            $BUILD_CMD assembleRelease --stacktrace
+            cp app/build/outputs/apk/release/*.apk dist/android/ 2>/dev/null || true
+          fi
+
+          # Always assemble Debug APK so a tested APK is guaranteed to be generated
+          echo "Building Debug APK..."
+          $BUILD_CMD assembleDebug --stacktrace
+          cp app/build/outputs/apk/debug/*.apk dist/android/ 2>/dev/null || true
+
+          # Output verification
+          echo "Android APK build outputs:"
+          ls -la dist/android/
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/android/*.apk
+          retention-days: 14
+
+  # ============================================================================
+  # 2. IOS BUILD JOB
+  # ============================================================================
+  build-ios:
+    name: Build iOS App
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode Version
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Detect and Build iOS Application
+        run: |
+          mkdir -p dist/ios
+
+          # Search for existing Xcode workspace or project
+          WORKSPACE=$(find . -maxdepth 3 -name "*.xcworkspace" | head -n 1)
+          PROJECT=$(find . -maxdepth 3 -name "*.xcodeproj" | head -n 1)
+
+          if [ -n "$WORKSPACE" ] || [ -n "$PROJECT" ]; then
+            echo "Found Xcode project/workspace. Proceeding with xcodebuild..."
+
+            # Install CocoaPods if Podfile exists
+            if [ -f "ios/Podfile" ] || [ -f "Podfile" ]; then
+              echo "Installing CocoaPods dependencies..."
+              pod install --repo-update || pod install
+            fi
+
+            TARGET_PARAM=""
+            if [ -n "$WORKSPACE" ]; then
+              SCHEME=$(xcodebuild -workspace "$WORKSPACE" -list -json 2>/dev/null | grep -A 5 "schemes" | grep -v "schemes" | tr -d '", ' | head -n 1)
+              TARGET_PARAM="-workspace $WORKSPACE -scheme ${SCHEME:-App}"
+            else
+              SCHEME=$(xcodebuild -project "$PROJECT" -list -json 2>/dev/null | grep -A 5 "schemes" | grep -v "schemes" | tr -d '", ' | head -n 1)
+              TARGET_PARAM="-project $PROJECT -scheme ${SCHEME:-App}"
+            fi
+
+            echo "Executing xcodebuild with $TARGET_PARAM..."
+            xcodebuild $TARGET_PARAM \
+              -destination "generic/platform=iOS" \
+              -configuration Release \
+              -archivePath "build/App.xcarchive" \
+              archive \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" || true
+
+            if [ -d "build/App.xcarchive" ]; then
+              cd build
+              zip -r "../dist/ios/App-iOS.xcarchive.zip" "App.xcarchive"
+              cd ..
+              echo "Packaged App-iOS.xcarchive.zip"
+            fi
+          else
+            echo "No Xcode project found in repository yet."
+            echo "Generating iOS build package instructions..."
+            cat << 'EOF' > dist/ios/README-iOS-Build.txt
+iOS Build Pipeline Information
+=============================
+This GitHub Actions workflow includes separate jobs for Android and iOS.
+Once you add an iOS target or Xcode project (e.g. in /ios or /iosApp), xcodebuild
+will automatically compile and package the release archive (.xcarchive / .zip).
+
+To enable automated App Store or Ad-Hoc code signing in CI:
+1. Export your Apple Distribution Certificate (.p12) and add it to GitHub Secrets.
+2. Add your Provisioning Profile (.mobileprovision) to GitHub Secrets.
+3. Configure APP_STORE_CONNECT_API_KEY in the workflow or repository secrets.
+EOF
+            tar -czf dist/ios/ios-build-info.tar.gz -C dist/ios README-iOS-Build.txt
+          fi
+
+          echo "iOS build outputs:"
+          ls -la dist/ios/
+
+      - name: Upload iOS Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: dist/ios/*
+          retention-days: 14
+
+  # ============================================================================
+  # 3. GITHUB RELEASE JOB
+  # ============================================================================
+  publish-release:
+    name: Publish Release to GitHub
+    runs-on: ubuntu-latest
+    needs: [build-android, build-ios]
+    if: |
+      always() &&
+      (needs.build-android.result == 'success' || needs.build-ios.result == 'success') &&
+      (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release == 'true'))
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Release Directory
+        run: mkdir -p release-assets
+
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: release-assets/
+        continue-on-error: true
+
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-build
+          path: release-assets/
+        continue-on-error: true
+
+      - name: Determine Release Tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          else
+            TAG="v1.0.0-build-$(date +'%Y%m%d%H%M%S')"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Selected tag: $TAG"
+
+      - name: List Release Assets
+        run: |
+          echo "Assets to publish:"
+          ls -la release-assets/
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "Release ${{ steps.get_tag.outputs.tag }}"
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          generate_release_notes: true
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
